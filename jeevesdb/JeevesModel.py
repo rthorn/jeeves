@@ -8,7 +8,7 @@ from django.db import models
 from django.db.models.query import QuerySet
 from django.db.models import Manager
 from django.db.models import CharField
-from django.db.models.loading import get_model
+from django.apps import apps
 import django.db.models.fields.related
 
 import JeevesLib
@@ -44,7 +44,7 @@ class JeevesQuerySet(QuerySet):
                 # TODO: Figure out why this line causes problems when we put in
                 # the obj that we have.
                 acquire_label_by_name(self.model._meta.app_label, var_name
-                  , obj=None) # TODO: obj=obj
+                  , obj=obj) # TODO: obj=obj
  
             # Go through the fields and get the environment associated with
             # each of the attributes.
@@ -164,6 +164,7 @@ class JeevesQuerySet(QuerySet):
                         print "WE HAVE GOTTEN THE LABEL"
                         label = solverstate.assignLabel(vlabel, env)
                         print map(lambda x: x.name, solverstate.policies.keys())
+
                         print label
                         print vval
                         print val
@@ -209,17 +210,15 @@ class JeevesQuerySet(QuerySet):
         raise NotImplementedError
 
     def none(self):
-        raise NotImplementedError
+        self.query.set_empty()
+        return self
 
 class JeevesManager(Manager):
     """The Jeeves version of Django's Manager class, which [...]
     """
     @JeevesLib.supports_jeeves
     def get_queryset(self):
-        return (super(JeevesManager, self).get_queryset()
-            ._clone(klass=JeevesQuerySet)
-              .order_by('jeeves_id')
-           )
+        return JeevesQuerySet(self.model, using=self._db).order_by('jeeves_id')
 
     def all(self):
         return super(JeevesManager, self).all().all()
@@ -250,7 +249,7 @@ def acquire_label_by_name(app_label, label_name, obj):
     else:
         label = JeevesLib.mkLabel(label_name, uniquify=False)
         model_name, field_name, jeeves_id = label_name.split('__')
-        model = get_model(app_label, model_name)
+        model = apps.get_model(app_label, model_name)
         # NOTE(JY): Optimization implemented. Make sure it's correct.
         # TODO: optimization: most of the time this obj will be the one we are
         # already fetching
@@ -332,11 +331,12 @@ class JeevesModel(models.Model):
                         if hasattr(self, '_meta') else []
         if name in field_names and \
             name not in ('jeeves_vars', 'jeeves_id', 'id'):
-            old_val = getattr(self, name) if hasattr(self, name) else \
-                        Unassigned("attribute '%s' in %s" % \
-                            (name, self.__class__.__name__))
-            models.Model.__setattr__(
-                self, name, JeevesLib.jassign(
+            if name in self.__dict__:
+                old_val = getattr(self, name)
+            else:
+                old_val = Unassigned("attribute '%s' in %s" % (name, self.__class__.__name__))
+            models.Model.__setattr__(self,
+                name, JeevesLib.jassign(
                     old_val, value, self.jeeves_base_env))
         else:
             models.Model.__setattr__(self, name, value)
@@ -622,19 +622,26 @@ class JeevesForeignKey(ForeignObject):
     @JeevesLib.supports_jeeves
     def __init__(self, to, *args, **kwargs):
         self.to = to
+        if (isinstance(to,basestring)):
+            super(JeevesForeignKey, self).__init__(
+                to, kwargs.pop("on_delete",models.DO_NOTHING),
+                kwargs.pop("from_fields",[]),
+                kwargs.pop("to_fields",[]),
+                *args, **kwargs)
+        else:
+            self.join_field = to._meta.pk
+            for field in to._meta.fields:
+                if field.name == 'jeeves_id':
+                    self.join_field = field
+                    break
+                else:
+                    # support non-Jeeves tables
+                    self.join_field = to._meta.pk
+                    #raise Exception("Need jeeves_id field")
 
-        for field in self.to._meta.fields:
-            if field.name == 'jeeves_id':
-                self.join_field = field
-                break
-            else:
-                # support non-Jeeves tables
-                self.join_field = to._meta.pk
-                #raise Exception("Need jeeves_id field")
-
-        kwargs['on_delete'] = models.DO_NOTHING
-        super(JeevesForeignKey, self).__init__(
-            to, [self], [self.join_field], *args, **kwargs)
+            super(JeevesForeignKey, self).__init__(
+                    to, models.DO_NOTHING, [self],
+                    [self.join_field], *args, **kwargs)
         self.db_constraint = False
 
     @JeevesLib.supports_jeeves
